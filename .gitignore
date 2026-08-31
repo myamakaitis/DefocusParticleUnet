@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+
+# Generated locally by the reproduction steps in the README -- not distributed.
+#   data/          synthetic train (~30 GB) + eval sets, and the MicroSIG download
+#   results/       metrics CSVs and figures
+#   network/runs/  training checkpoints
+# The calibration stack (templates/) and the published checkpoint
+# (network/Defocus_PCNN_net00_Epoch00100.pth) are NOT generated and must stay
+# tracked: without them generate_synthetic.py and evaluate.py cannot run.
+data/
+results/
+network/runs/
+*.npz

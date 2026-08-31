@@ -1,0 +1,9 @@
+torch>=2.0
+numpy
+pandas
+matplotlib
+joblib
+Pillow
+
+# optional: only needed to read the 16-bit MicroSIG TIFF stacks
+tifffile
