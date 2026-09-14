@@ -8,7 +8,16 @@ __pycache__/
 # The calibration stack (templates/) and the published checkpoint
 # (network/Defocus_PCNN_net00_Epoch00100.pth) are NOT generated and must stay
 # tracked: without them generate_synthetic.py and evaluate.py cannot run.
-data/
+data/synthetic
 results/
 network/runs/
+
+# Generated datasets are .npz and live under data/, which is already ignored.
+# The blanket rule stays as a guard against a stray multi-GB tile landing
+# anywhere else -- but example_data/ is DISTRIBUTED, not generated: the README's
+# minimal-usage snippet loads one of those files by name, so they must be
+# tracked or a fresh clone cannot run it.
 *.npz
+!example_data/**/*.npz
+!templates/**/*.npz
+!experimental/**/*.npz
