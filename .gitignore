@@ -1,31 +1,23 @@
 __pycache__/
 *.pyc
 
-# Generated locally by the reproduction steps in the README -- not distributed.
-#   data/          synthetic train (~30 GB) + eval sets, and the MicroSIG download
+# Generated locally by the reproduction steps in the README:
+#   data/          synthetic and experimental train + eval sets, and the
+#                  MicroSIG download
 #   network/runs/  training checkpoints
-# The calibration stack (templates/) and the published checkpoint
-# (network/Defocus_PCNN_net00_Epoch00100.pth) are NOT generated and must stay
-# tracked: without them generate_synthetic.py and evaluate.py cannot run.
-data/synthetic
+# templates/ and the two published checkpoints under network/ are not
+# generated and stay tracked.
+data/
 network/runs/
 
-# results/ is NOT ignored. The metrics CSVs are small and the published
-# figures are the paper's: they are distributed, not regenerated on trust.
-
-# Generated datasets are .npz and live under data/, which is already ignored.
-# The blanket rule stays as a guard against a stray multi-GB tile landing
-# anywhere else -- but example_data/ is DISTRIBUTED, not generated: the README's
-# minimal-usage snippet loads one of those files by name, so they must be
-# tracked or a fresh clone cannot run it.
+# Generated tiles are .npz.  The blanket rule guards against a stray multi-GB
+# tile outside data/; the exceptions are distributed, not generated.
 *.npz
 !example_data/**/*.npz
 !templates/**/*.npz
 !experimental/**/*.npz
-# results/figures and experimental/tracks are DISTRIBUTED, not generated, for
-# the same reason example_data/ is.  The tracks are the paper's own tables and
-# make_figures_experimental.py reads them and nothing else, so ignoring them
-# leaves a fresh clone unable to reproduce a single experimental figure; the
-# figures themselves are the published ones, and are worth having in the
-# history so a change to a script shows up as a change to a picture.
+
+# The metrics CSVs and experimental/tracks/ are tracked:
+# make_figures_experimental.py reads the tracks and nothing else.  The rendered
+# figures are not -- they are regenerated from those tables.
 /results/figures
