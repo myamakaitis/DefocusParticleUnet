@@ -85,29 +85,128 @@ def _split_show(ax, img_ln, img_hn, vmax):
 # ----------------------------------------------------------------------------
 # Calibration z-stack GIF
 # ----------------------------------------------------------------------------
-def fig_calstack():
+#: Half-width of the synthetic crop, in TEMPLATE pixels -- the framing the
+#: calibration stack has always been shown at.
+CAL_SYN_HALF = 64
+#: EACH PANEL IS SCALED TO ITS OWN MAXIMUM, linearly, with no gamma.
+#:
+#: Not one scale for the whole stack, as the animated version used: the peak
+#: varies more than 25x over the trained depth, so a shared scale renders the
+#: defocused planes black.  That was tolerable frame by frame in a GIF, where
+#: the eye re-adapts on every frame, and is not in a row read at once.
+#:
+#: And no gamma on top of it.  A gamma stretch would show structure at a
+#: contrast the image never has, which is not what the PSF looks like.
+
+#: Image-pixel ticks per row.  Symmetric about the particle, so the two rows
+#: are read against each other directly.
+CAL_TICKS_SYN = (-32, 0, 32)
+CAL_TICKS_EXP = (-20, 0, 20)
+#: Where the experimental stack lives, and how many planes across to show.
+EXP_CAL_DIR = os.path.join(REPO_ROOT, "templates", "Channel_cal")
+CAL_NCOL = 5
+
+
+def _synthetic_stack():
+    """The MicroSIG stack, DOWNSAMPLED to image pixels.  Not cropped.
+
+    The templates are rendered at PSF_XY_SCALE template pixels per image
+    pixel, so shown raw they portray a resolution the camera never has.  Area
+    averaging down by that factor is what a sensor does -- it integrates over
+    the pixel -- and it is also what makes this row comparable with the
+    experimental one, which is already at one pixel per pixel.
+    """
     stack = np.zeros((gen.NZ, gen.PSF_TILE_SIZE, gen.PSF_TILE_SIZE), np.float32)
     for i in range(gen.NZ):
-        stack[i] = np.asarray(Image.open(os.path.join(gen.PSF_DIR, f"B{i + 1:05d}.tif")))
-    stack /= stack.max()
-    c, half = gen.PSF_CENTER, 64
-    crop = stack[:, c - half:c + half, c - half:c + half]
-    z = np.linspace(0, 1, gen.NZ)
+        stack[i] = np.asarray(Image.open(
+            os.path.join(gen.PSF_DIR, f"B{i + 1:05d}.tif")))
+    n = int(round(gen.PSF_TILE_SIZE / gen.PSF_XY_SCALE))
+    # Image.BOX is area averaging; BILINEAR or LANCZOS would invent contrast
+    # the sensor does not deliver.
+    out = np.stack([np.asarray(Image.fromarray(p).resize((n, n), Image.BOX))
+                    for p in stack]).astype(np.float32)
+    return out, np.linspace(0, 1, gen.NZ)
 
-    frames = []
-    for i in range(gen.NZ):
-        fig, ax = plt.subplots(figsize=(3, 3), dpi=150)
-        ax.imshow(crop[i], cmap="gray", vmin=0, vmax=1, interpolation="nearest")
-        ax.set_title(rf"$z = {z[i]:.2f}$")
-        ax.set_xticks(()); ax.set_yticks(())
-        fig.tight_layout()
-        fig.canvas.draw()
-        frames.append(Image.fromarray(np.asarray(fig.canvas.buffer_rgba())[..., :3].copy()))
-        plt.close(fig)
 
-    out = os.path.join(FIGS_DIR, "fig_calstack.gif")
-    frames[0].save(out, save_all=True, append_images=frames[1:], duration=100, loop=0)
-    print("wrote", out)
+def _experimental_stack():
+    """The measured stack, already at one template pixel per image pixel."""
+    csv_path = os.path.join(EXP_CAL_DIR, "calibration.csv")
+    if not os.path.exists(csv_path):
+        return None, None
+    z = pd.read_csv(csv_path).z_um.values.astype(np.float32)
+    stack = np.stack([np.asarray(Image.open(
+        os.path.join(EXP_CAL_DIR, f"B{i + 1:05d}.tif")))
+        for i in range(len(z))]).astype(np.float32)
+    # The shipped stack runs PAST the trained range by a bracketing plane,
+    # because depth is interpolated between planes and the top of the range
+    # needs a neighbour above it.  No particle is ever generated there.
+    try:
+        import generate_experimental as gexp
+        lo, hi = gexp.Z_TRAINED_UM
+        keep = (z >= lo - 1e-6) & (z <= hi + 1e-6)
+        stack, z = stack[keep], z[keep]
+    except Exception:
+        pass
+    return stack, z
+
+
+def fig_calstack():
+    """The two calibration stacks, sampled across depth.
+
+    Top row the synthetic case, bottom row the experimental one, five planes
+    each, evenly spaced through the depth range that case is trained over.
+
+    BOTH ROWS ARE IN IMAGE PIXELS, centred on the particle, each at its own
+    extent rather than cropped to a common one -- the vertical axis is left
+    ticked so the difference in extent is on the figure.  The horizontal axis
+    carries no ticks: it would repeat the vertical one and cost a row of
+    white space.
+    """
+    syn, z_syn = _synthetic_stack()
+    exp, z_exp = _experimental_stack()
+    rows = [(syn, z_syn, r"$\mu$SIG", lambda v: rf"$z = {v:.2f}$",
+             CAL_TICKS_SYN)]
+    if exp is not None:
+        rows.append((exp, z_exp, "experimental",
+                     lambda v: rf"$z = {v:+.0f}$ $\mu$m", CAL_TICKS_EXP))
+    else:
+        print("  [calstack] templates/Channel_cal absent -- synthetic row only")
+
+    fig, ax = plt.subplots(len(rows), CAL_NCOL, figsize=(7.16, 3.3), dpi=600,
+                           squeeze=False, constrained_layout=True)
+    for r, (stack, z, label, fmt, ticks) in enumerate(rows):
+        idx = np.linspace(0, len(z) - 1, CAL_NCOL).round().astype(int)
+        h = stack.shape[-1] / 2.0
+        lim = max(abs(t) for t in ticks)
+        for c, i in enumerate(idx):
+            a = ax[r, c]
+            im = stack[i]
+            im = im / max(float(im.max()), 1e-12)
+            a.imshow(im, cmap="gray", vmin=0, vmax=1, interpolation="nearest",
+                     extent=(-h, h, h, -h))
+            # Frame the ticks, not the template.  The stored stamp is wider
+            # than the PSF ever is, so showing all of it spends most of the
+            # panel on black.
+            a.set_xlim(-lim, lim)
+            a.set_ylim(lim, -lim)
+            a.set_title(fmt(float(z[i])), fontsize=9, pad=3)
+            a.set_xticks(())
+            if c:
+                a.set_yticks(())
+            else:
+                a.set_yticks(ticks)
+                a.tick_params(labelsize=8)
+        ax[r, 0].set_ylabel(label, fontsize=11)
+        # Panel letter inside the frame, not as a left-aligned title: the
+        # title slot already carries the depth.
+        ax[r, 0].text(0.04, 0.96, f"({chr(97 + r)})", transform=ax[r, 0].transAxes,
+                      color="w", fontsize=12, fontweight="bold",
+                      va="top", ha="left")
+    out = os.path.join(FIGS_DIR, "fig_calstack.eps")
+    fig.savefig(out, bbox_inches="tight")
+    fig.savefig(out.replace(".eps", ".png"), dpi=300, bbox_inches="tight")
+    plt.close(fig)
+    print("wrote", out, "(+ .png)")
 
 
 # ----------------------------------------------------------------------------

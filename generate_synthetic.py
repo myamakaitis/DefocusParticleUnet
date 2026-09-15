@@ -167,7 +167,8 @@ def _make_gt_maps(p_in, q_in, ip_in, iq_in, z_in, amp_in,
 # ----------------------------------------------------------------------------
 def GenSampledPSFTile(discretePSF, tile_size, n_peaks, noise_sigma, device,
                       n_peak_std=PPP_STD, I_std=I_STD, z_min=Z_MIN, z_max=Z_MAX,
-                      gt_sigma=GT_SIGMA, gt_window_size=GT_WINDOW_SIZE):
+                      gt_sigma=GT_SIGMA, gt_window_size=GT_WINDOW_SIZE,
+                      noise_fn=None):
     """Render one synthetic image, its 5-channel soft GT map, and the exact
     particle list.
 
@@ -176,6 +177,13 @@ def GenSampledPSFTile(discretePSF, tile_size, n_peaks, noise_sigma, device,
     img   : (H, W) float32    — synthetic grayscale image (raw, un-normalized)
     gt    : (5, H, W) float32 — [mask_soft, dp, dq, z, I], the training target
     peaks : (N, 4) float32    — exact [x, y, z, I] per rendered particle
+
+    ``noise_fn`` replaces the noise step entirely: it takes the clean (H, W)
+    render and returns the noisy one, so a sensor model that is not additive
+    Gaussian (shot noise acting ON the signal, a measured fixed pattern) can
+    reuse this renderer rather than copy it. ``None`` keeps the additive
+    Gaussian at ``noise_sigma``, which is what the published synthetic set
+    was generated with.
     """
     H = W = int(tile_size)
 
@@ -186,7 +194,7 @@ def GenSampledPSFTile(discretePSF, tile_size, n_peaks, noise_sigma, device,
     sigmaILN = torch.sqrt(torch.log(1 + (I_std / MeanILN) ** 2))
     ILN      = LogNormal(muILN, sigmaILN)
 
-    N = Normal(0.0, noise_sigma)
+    N = Normal(0.0, noise_sigma) if noise_fn is None else None
 
     # --- sample peaks --------------------------------------------------------
     mean_np = float(n_peaks)
@@ -226,7 +234,7 @@ def GenSampledPSFTile(discretePSF, tile_size, n_peaks, noise_sigma, device,
             img += (ic[:, None] * g).sum(0)
 
     img = img.reshape((H, W))
-    img += N.sample(img.shape).to(device)
+    img = noise_fn(img) if noise_fn is not None else img + N.sample(img.shape).to(device)
 
     # --- soft Gaussian ground-truth labels ------------------------------------
     ip, iq = cx.round().long(), cy.round().long()

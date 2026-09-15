@@ -5,5 +5,7 @@ matplotlib
 joblib
 Pillow
 
-# optional: only needed to read the 16-bit MicroSIG TIFF stacks
+# needed to read the 16-bit MicroSIG stacks and the signed 16-bit
+# experimental patches under experimental/patches -- PIL cannot read
+# a signed 16-bit TIFF at all
 tifffile

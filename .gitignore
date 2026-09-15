@@ -22,3 +22,10 @@ network/runs/
 !example_data/**/*.npz
 !templates/**/*.npz
 !experimental/**/*.npz
+# results/figures and experimental/tracks are DISTRIBUTED, not generated, for
+# the same reason example_data/ is.  The tracks are the paper's own tables and
+# make_figures_experimental.py reads them and nothing else, so ignoring them
+# leaves a fresh clone unable to reproduce a single experimental figure; the
+# figures themselves are the published ones, and are worth having in the
+# history so a change to a script shows up as a change to a picture.
+/results/figures

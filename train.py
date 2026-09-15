@@ -11,6 +11,8 @@ Usage:
     python train.py
 """
 import os
+import glob
+import argparse
 from itertools import product
 from time import perf_counter
 from datetime import datetime as dt
@@ -28,8 +30,22 @@ from pcnn import PeakCNN_UNet_4level_ConvNeXt, eval_classification_nms
 # Paths / configuration
 # ----------------------------------------------------------------------------
 REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
-TRAIN_DIR = os.path.join(REPO_ROOT, "data", "synthetic", "train")
 SAVE_ROOT = os.path.join(REPO_ROOT, "network", "runs")
+
+# Which dataset to train on.  The two differ ONLY in their imaging model and
+# how the tiles are foldered; the network, labels, loss and schedule below are
+# shared, which is what makes the two results comparable.
+#
+#   synthetic     data/synthetic/train/<ppp>ppp/<noise>Noise/   (generate_synthetic.py)
+#                 noise is a two-level grid, so it is a folder level.
+#   experimental  data/experimental/train/<ppp>ppp/             (generate_experimental.py)
+#                 noise is a continuous per-tile draw, so it is not.
+CASES = {
+    "synthetic":    dict(root=os.path.join(REPO_ROOT, "data", "synthetic", "train"),
+                        n_cases=5000),
+    "experimental": dict(root=os.path.join(REPO_ROOT, "data", "experimental", "train"),
+                        n_cases=10_000),
+}
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Device: {device}")
@@ -52,8 +68,7 @@ Z_SCALE = 1.0
 # 3 ppp × 2 noise × 5000 = 30,000 images at 256², all held in RAM
 # (~47 GB with the 5-channel GT).
 TRAIN_PPPS  = np.array([0.001, 0.005, 0.025])
-TRAIN_NOISE = (2.5e-3, 6.25e-2)
-N_CASES     = 5000            # samples per (ppp, noise) folder
+TRAIN_NOISE = (2.5e-3, 6.25e-2)   # synthetic only
 CASE_OFFSET = 0
 
 # training schedule
@@ -71,6 +86,43 @@ lambda_cls  = 1_000.0
 lambda_spx  = 10.0
 lambda_z    = 50.0
 lambda_I    = 0.0        # amplitude (ch 4) is UNUSED: zero weight -> head not learned
+
+
+def case_folders(case):
+    """The training folders for a case, and the samples each holds."""
+    cfg = CASES[case]
+    root = cfg['root']
+    if case == "synthetic":
+        folders = [os.path.join(root, f'{ppp:.3f}ppp', f'{ns:.4f}Noise')
+                   for ppp, ns in product(TRAIN_PPPS, TRAIN_NOISE)]
+    else:
+        folders = [os.path.join(root, f'{ppp:.3f}ppp') for ppp in TRAIN_PPPS]
+    missing = [f for f in folders if not os.path.isdir(f)]
+    if missing:
+        raise FileNotFoundError(
+            f'{case}: no training data at {missing[0]} -- run '
+            f'generate_{case}.py first.')
+    return folders, cfg['n_cases']
+
+
+def depth_scale(folders):
+    """The depth range the labels are normalised over, read FROM the data.
+
+    The experimental tiles carry `z_range_um`, because their depth is a real
+    measurement rescaled to [0, 1]; the synthetic ones do not, because theirs
+    is [0, 1] to begin with.  Reading it from the dataset rather than
+    hard-coding it here is what keeps a checkpoint honest: whatever the data
+    says is what gets written into the checkpoint, and a prediction is
+    meaningless without it -- the same output value means a different depth
+    under a different range.
+    """
+    f = sorted(glob.glob(os.path.join(folders[0], 'case*.npz')))
+    if not f:
+        return None
+    with np.load(f[0]) as c:
+        if 'z_range_um' not in c.files:
+            return None
+        return [float(v) for v in c['z_range_um']]
 
 
 # ----------------------------------------------------------------------------
@@ -147,8 +199,10 @@ def peak_cnn_loss(gt, pred, lambda_cls, lambda_spx, lambda_z, lambda_I):
     return loss, (loss_cls, loss_spx, loss_z, loss_I)
 
 
-def write_params(folder, now):
+def write_params(folder, now, case, n_cases, z_range):
     with open(os.path.join(folder, f"params_{now}.txt"), 'w') as f:
+        f.write(f"case          = {case}\n")
+        f.write(f"z_range_um    = {z_range}\n")
         f.write(f"N_NETWORKS    = {N_NETWORKS}\n")
         f.write(f"IMG_H/W       = {IMG_H}x{IMG_W}\n")
         f.write(f"NCH           = {NCH}\n")
@@ -157,8 +211,8 @@ def write_params(folder, now):
         f.write(f"N_EPOCH       = {N_EPOCH}\n")
         f.write(f"BATCH_SIZE    = {BATCH_SIZE}\n")
         f.write(f"TRAIN_PPPS    = {list(TRAIN_PPPS)}\n")
-        f.write(f"TRAIN_NOISE   = {TRAIN_NOISE}\n")
-        f.write(f"N_CASES       = {N_CASES}\n")
+        f.write(f"TRAIN_NOISE   = {TRAIN_NOISE if case == 'synthetic' else 'per-tile log-uniform'}\n")
+        f.write(f"N_CASES       = {n_cases}\n")
         f.write(f"LR_MAX/MIN    = {LR_MAX}/{LR_MIN}\n")
         f.write(f"scheduler     = CosineAnnealingLR (no restarts)\n")
         f.write(f"FOCAL a/g     = {FOCAL_ALPHA}/{FOCAL_GAMMA}\n")
@@ -168,7 +222,7 @@ def write_params(folder, now):
 # ----------------------------------------------------------------------------
 # Train
 # ----------------------------------------------------------------------------
-def train_one_network(net_idx, data_loader, save_folder, t0):
+def train_one_network(net_idx, data_loader, save_folder, t0, extra=None):
     model     = PeakCNN_UNet_4level_ConvNeXt(N_in=1, N_mid=NCH, N_out=N_OUT).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=LR_MAX)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
@@ -214,8 +268,8 @@ def train_one_network(net_idx, data_loader, save_folder, t0):
 
         if (i % CheckPoint == 0 and i != 0) or i == N_EPOCH:
             model.save_checkpoint(
-                os.path.join(save_folder, f"PCNN_net{net_idx:02d}_Epoch{i:05d}_f1{f1:.3f}.pth")
-            )
+                os.path.join(save_folder, f"PCNN_net{net_idx:02d}_Epoch{i:05d}_f1{f1:.3f}.pth"),
+                extra=extra)
 
     del model, optimizer, scheduler
     if device.type == "cuda":
@@ -223,27 +277,34 @@ def train_one_network(net_idx, data_loader, save_folder, t0):
 
 
 def main():
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("--case", default="synthetic", choices=sorted(CASES),
+                    help="which dataset to train on (default: synthetic)")
+    args = ap.parse_args()
     os.makedirs(SAVE_ROOT, exist_ok=True)
 
-    data_folders = [
-        os.path.join(TRAIN_DIR, f"{ppp:.3f}ppp", f"{ns:.4f}Noise")
-        for ppp, ns in product(TRAIN_PPPS, TRAIN_NOISE)
-    ]
+    data_folders, n_cases = case_folders(args.case)
+    z_range = depth_scale(data_folders)
+    print(f"Case: {args.case} | {len(data_folders)} folders x {n_cases} cases"
+          f"{f'  | depth {z_range[0]:+.2f}..{z_range[1]:+.2f} um' if z_range else ''}")
 
     # dataset loaded ONCE, shared by every network
-    dataset     = CPUMemDataset(data_folders, N_CASES, IMG_H, IMG_W, N_OUT, CASE_OFFSET)
+    dataset     = CPUMemDataset(data_folders, n_cases, IMG_H, IMG_W, N_OUT, CASE_OFFSET)
     data_loader = dataset.getDataLoader(BATCH_SIZE, drop_last=True, pin_memory=True,
                                         num_workers=0, shuffle=True)
 
     now         = dt.now().strftime("%Y_%m_%d_%H-%M")
-    save_folder = os.path.join(SAVE_ROOT, f"PCNN_{now}")
+    save_folder = os.path.join(SAVE_ROOT, f"PCNN_{args.case}_{now}")
     os.makedirs(save_folder, exist_ok=True)
-    write_params(save_folder, now)
+    write_params(save_folder, now, args.case, n_cases, z_range)
+    extra = dict(case=args.case)
+    if z_range is not None:
+        extra['z_range'] = z_range
 
     t0 = perf_counter()
     for net_idx in range(N_NETWORKS):
         print(f"\n{'='*60}\nTraining network {net_idx + 1} / {N_NETWORKS}\n{'='*60}")
-        train_one_network(net_idx, data_loader, save_folder, t0)
+        train_one_network(net_idx, data_loader, save_folder, t0, extra=extra)
 
 
 if __name__ == "__main__":
